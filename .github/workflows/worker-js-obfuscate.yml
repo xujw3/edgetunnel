@@ -1,0 +1,113 @@
+name: Obfuscate Worker after upstream sync
+
+permissions:
+  contents: write
+  actions: read
+
+on:
+  workflow_run:
+    workflows:
+      - Upstream Sync
+    types:
+      - completed
+  workflow_dispatch:
+
+jobs:
+  obfuscate-worker:
+    name: Generate and publish strongly obfuscated Worker
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout synced repository
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Generate strongly obfuscated Worker
+        run: |
+          mkdir -p dist
+          npx --yes javascript-obfuscator@4.1.1 _worker.js \
+            --output dist/_worker.js \
+            --target browser-no-eval \
+            --compact true \
+            --identifier-names-generator hexadecimal \
+            --rename-globals false \
+            --seed 20260618 \
+            --control-flow-flattening true \
+            --control-flow-flattening-threshold 0.75 \
+            --dead-code-injection true \
+            --dead-code-injection-threshold 0.30 \
+            --numbers-to-expressions true \
+            --simplify true \
+            --string-array true \
+            --string-array-calls-transform true \
+            --string-array-calls-transform-threshold 0.75 \
+            --string-array-encoding base64 \
+            --string-array-indexes-type hexadecimal-number \
+            --string-array-rotate true \
+            --string-array-shuffle true \
+            --string-array-threshold 1 \
+            --split-strings true \
+            --split-strings-chunk-length 8 \
+            --unicode-escape-sequence true
+
+      - name: Validate obfuscated Worker syntax
+        run: node --check dist/_worker.js
+
+      - name: Upload obfuscated Worker artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-obfuscated
+          path: dist/_worker.js
+          if-no-files-found: error
+
+      - name: Publish obfuscated Worker branch
+        env:
+          TARGET_BRANCH: obfuscated
+        run: |
+          set -euo pipefail
+
+          temp_dir="$(mktemp -d)"
+          cp dist/_worker.js "$temp_dir/_worker.js"
+          cp wrangler.toml "$temp_dir/wrangler.toml"
+          cat > "$temp_dir/README.md" <<'EOF'
+          # Obfuscated Worker build
+
+          This branch is generated automatically by GitHub Actions from `main`.
+
+          - Source branch: `main`
+          - Source file: `_worker.js`
+          - Generated file: `_worker.js`
+          - Generator: `javascript-obfuscator`
+
+          Do not edit this branch manually. Change `main` instead, then rerun the obfuscation workflow.
+          EOF
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --heads origin "$TARGET_BRANCH" >/dev/null 2>&1; then
+            git fetch origin "$TARGET_BRANCH:$TARGET_BRANCH"
+            git switch "$TARGET_BRANCH"
+            git rm -r --ignore-unmatch .
+          else
+            git switch --orphan "$TARGET_BRANCH"
+            git rm -r --ignore-unmatch .
+          fi
+
+          cp "$temp_dir/_worker.js" _worker.js
+          cp "$temp_dir/wrangler.toml" wrangler.toml
+          cp "$temp_dir/README.md" README.md
+
+          git add _worker.js wrangler.toml README.md
+
+          if git diff --cached --quiet; then
+            echo "No obfuscated Worker changes to publish."
+            exit 0
+          fi
+
+          git commit -m "chore: publish obfuscated worker"
+          git push origin "$TARGET_BRANCH"
